@@ -1,0 +1,11 @@
+# 共用核心
+requests>=2.31
+yt-dlp>=2024.0
+# Web
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+# 本地转录引擎（离线免费，首次运行自动下模型）
+faster-whisper>=1.0
+numpy>=1.24
+# 系统依赖（非 pip）：ffmpeg —— brew install ffmpeg / apt install ffmpeg
