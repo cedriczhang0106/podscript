@@ -231,13 +231,29 @@ def _split_paragraphs(text: str, target: int = 160) -> list[str]:
     return paras or ([text] if text else [])
 
 
-def _build_sections(clean_lines: list[str], boundaries: list[dict]) -> list[dict]:
-    """把每行归入最近一个起点<=该行时间的段；合并为段落文本。"""
+def _speaker_paras(chunk: list) -> list:
+    """按说话人轮次合并：连续同一说话人的句子并成一段，前缀「说话人X：」。"""
+    paras, cur_spk, buf = [], None, ""
+    for r in chunk:
+        spk = r[3] if len(r) > 3 else ""
+        if buf and spk != cur_spk:
+            paras.append((f"{cur_spk}：" if cur_spk else "") + buf.strip())
+            buf = ""
+        cur_spk = spk
+        buf += r[2]
+    if buf.strip():
+        paras.append((f"{cur_spk}：" if cur_spk else "") + buf.strip())
+    return paras or ([chunk[0][2]] if chunk else [])
+
+
+def _build_sections(clean_lines: list[str], boundaries: list[dict], speakers=None) -> list[dict]:
+    """把每行归入最近一个起点<=该行时间的段；合并为段落文本（有说话人则按轮次分段）。"""
     rows = []
-    for ln in clean_lines:
+    for i, ln in enumerate(clean_lines):
         m = TS_LINE.match(ln)
         if m:
-            rows.append((_ts_to_sec(m.group(1)), m.group(1), m.group(2)))
+            spk = speakers[i] if (speakers and i < len(speakers)) else ""
+            rows.append((_ts_to_sec(m.group(1)), m.group(1), m.group(2), spk))
     if not boundaries:
         boundaries = [{"title": "", "start": 0}]
     boundaries = sorted(boundaries, key=lambda x: x["start"])
@@ -250,12 +266,13 @@ def _build_sections(clean_lines: list[str], boundaries: list[dict]) -> list[dict
         if not chunk:
             continue
         text = "".join(r[2] for r in chunk).strip()
+        paras = _speaker_paras(chunk) if speakers else _split_paragraphs(text)
         out.append({
             "title": b.get("title", ""),
             "ts": chunk[0][1].strip("[]"),
             "text": text,
-            "paras": _split_paragraphs(text),
-            "lines": [{"ts": r[1].strip("[]"), "text": r[2]} for r in chunk],
+            "paras": paras,
+            "lines": [{"ts": r[1].strip("[]"), "text": r[2], "speaker": r[3]} for r in chunk],
         })
     return [s for s in out if s["text"]]
 
@@ -264,7 +281,7 @@ def _build_sections(clean_lines: list[str], boundaries: list[dict]) -> list[dict
 def process(segments: list[tuple[float, str]], *, punctuate: bool = True,
             summary: bool = True, llm_key: str | None = None,
             llm_base: str | None = None, llm_model: str | None = None,
-            allow_llm: bool = True) -> dict:
+            allow_llm: bool = True, speakers=None) -> dict:
     """segments → {raw_lines, clean_lines, summary, points, cleaned}。"""
     raw_lines = [f"{fmt_ts(t)} {text}" for t, text in segments]
     cfg = config.llm_config(llm_key, llm_base, llm_model) if (allow_llm and (punctuate or summary)) else None
@@ -288,7 +305,7 @@ def process(segments: list[tuple[float, str]], *, punctuate: bool = True,
     bounds = _segment_by_topic(clean_lines, cfg) if (cfg and summary) else []
     if not bounds:
         bounds = _time_block_sections(clean_lines, 600)
-    sections = _build_sections(clean_lines, bounds)
+    sections = _build_sections(clean_lines, bounds, speakers)
     seg_points = [s["title"] for s in sections if s.get("title")]
 
     return {
@@ -300,6 +317,7 @@ def process(segments: list[tuple[float, str]], *, punctuate: bool = True,
         "llm_used": bool(cfg),
         "llm_model": (cfg.get("model") if cfg else None),
         "llm_error": llm_error,
+        "has_speakers": bool(speakers),
     }
 
 

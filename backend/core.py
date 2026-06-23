@@ -20,7 +20,7 @@ def _safe(name: str, maxlen: int = 40) -> str:
 
 
 def run(url: str, *, engine: str = "auto", punctuate: bool = True, summary: bool = True,
-        allow_llm: bool = True,
+        allow_llm: bool = True, diarize: bool = False, hf_token: str | None = None,
         whisper_model: str = "small", llm_key: str | None = None,
         llm_base: str | None = None, llm_model: str | None = None,
         workdir: Path | None = None, keep_audio: bool = False,
@@ -41,12 +41,16 @@ def run(url: str, *, engine: str = "auto", punctuate: bool = True, summary: bool
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             if d.get("meta", {}).get("url") == url and d.get("segments"):
+                cached_speakers = d.get("speakers")
+                if diarize and not cached_speakers:
+                    continue
                 emit("复用已转录稿")
                 meta = d["meta"]
                 segments = [(s["start"], s["text"]) for s in d["segments"]]
                 emit("清洗与摘要")
                 result = pipeline.process(segments, punctuate=punctuate, summary=summary,
-                                          llm_key=llm_key, llm_base=llm_base, llm_model=llm_model, allow_llm=allow_llm)
+                                          llm_key=llm_key, llm_base=llm_base, llm_model=llm_model,
+                                          allow_llm=allow_llm, speakers=(cached_speakers if diarize else None))
                 return {"meta": meta, "result": result, "segments": segments, "raw_path": f}
         except Exception:
             continue
@@ -63,18 +67,35 @@ def run(url: str, *, engine: str = "auto", punctuate: bool = True, summary: bool
         if not segments:
             raise RuntimeError("转录结果为空（未识别到语音）")
 
-        # 原始稿留档（去清洗前）
+        # 2.5 可选：说话人分离（需音频，必须在删音频前做）
+        seg_speakers, diar_error = None, None
+        if diarize:
+            emit("说话人分离")
+            try:
+                from . import diar
+                turns = diar.diarize(audio, hf_token)
+                seg_speakers = diar.assign(segments, turns)
+            except Exception as e:
+                diar_error = f"说话人分离失败：{e}"
+
+        # 原始稿留档（去清洗前；带说话人便于复用）
         stem = _safe(f"{meta.get('show','')}-{meta.get('title','')}")
         raw_path = raw_dir / f"{stem}.raw.json"
-        raw_path.write_text(json.dumps({
+        _raw = {
             "meta": {k: (str(v) if isinstance(v, Path) else v) for k, v in meta.items()},
             "segments": [{"start": round(t, 2), "text": x} for t, x in segments],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        }
+        if seg_speakers:
+            _raw["speakers"] = seg_speakers
+        raw_path.write_text(json.dumps(_raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 3. 清洗 + 提炼
         emit("清洗与摘要")
         result = pipeline.process(segments, punctuate=punctuate, summary=summary,
-                                  llm_key=llm_key, llm_base=llm_base, llm_model=llm_model, allow_llm=allow_llm)
+                                  llm_key=llm_key, llm_base=llm_base, llm_model=llm_model,
+                                  allow_llm=allow_llm, speakers=seg_speakers)
+        if diar_error:
+            result["diar_error"] = diar_error
         return {"meta": meta, "result": result, "segments": segments, "raw_path": raw_path}
     finally:
         # 4. 文本优先：删音频（除非显式保留）

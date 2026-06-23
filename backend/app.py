@@ -27,6 +27,7 @@ class TranscribeReq(BaseModel):
     engine: str = "auto"           # 转录恒本地（faster-whisper）；不再有云端 ASR
     punctuate: bool = True
     summary: bool = True
+    diarize: bool = False           # 说话人分离（访谈用；需 pyannote + HF token）
     llm: bool = True               # 前端模式：接大模型=True，本地=False（False 时连环境变量里的 key 也不使用）
     api_key: str | None = None     # 「自带 KEY」：仅用于清洗+摘要 LLM（OpenAI 兼容），不碰转录
     api_base: str | None = None    # OpenAI 兼容 base_url（DeepSeek/Kimi/GLM）
@@ -55,6 +56,7 @@ def transcribe(req: TranscribeReq):
             req.url,
             engine="local",                      # 转录恒本地 faster-whisper
             punctuate=req.punctuate, summary=req.summary, allow_llm=req.llm,
+            diarize=req.diarize, hf_token=config.hf_token(),
             whisper_model=req.whisper_model,
             llm_key=req.api_key, llm_base=req.api_base, llm_model=req.api_model,
         )
@@ -97,6 +99,8 @@ def transcribe(req: TranscribeReq):
         "llm_used": result.get("llm_used", False),
         "llm_model": result.get("llm_model"),
         "llm_error": result.get("llm_error"),
+        "has_speakers": result.get("has_speakers", False),
+        "diar_error": result.get("diar_error"),
         "lines": lines,
         "saved_path": saved_path,
         "save_error": save_error,

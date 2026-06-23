@@ -208,6 +208,7 @@
   .sec-p{font-size:15px;line-height:1.9;color:var(--ink2);margin:0 0 13px}
   .sec-p:last-child{margin-bottom:0}
   .llm-err{border:1px solid #b3261e;color:#b3261e;padding:14px 16px;margin-bottom:20px;font-size:13.5px;line-height:1.65}
+  .spk{color:var(--ink);font-weight:600}
   .genby{display:inline-block;margin-left:8px;padding:2px 9px;border:1px solid var(--ink);border-radius:999px;font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;color:var(--ink);vertical-align:middle}
   .genby.local{border-color:var(--rule2);color:var(--ink2)}
 </style>
@@ -266,6 +267,7 @@
     <span class="detect">来源 — <b id="src">自动识别</b></span>
     <label class="chk"><input type="checkbox" id="op-p" checked>智能断句 + 标点</label>
     <label class="chk"><input type="checkbox" id="op-s" checked>AI 摘要 / 要点</label>
+    <label class="chk"><input type="checkbox" id="op-d">区分说话人 · 访谈</label>
   </div>
   <div class="vrow">
     <span class="vlbl">落点 / OUTPUT</span>
@@ -482,6 +484,7 @@
       body:JSON.stringify({url:v,engine:"auto",
         punctuate:document.getElementById("op-p").checked,
         summary:document.getElementById("op-s").checked,
+        diarize:document.getElementById("op-d").checked,
         llm:(eng==="api"),
         vault:vault||null,
         api_key:(eng==="api"?apiKey:"")||null,
@@ -524,13 +527,14 @@
     if(j.sections&&j.sections.length){
       scr.innerHTML=j.sections.map(function(s,i){
         var h='<div class="sec-h"><span class="sec-ts">['+esc(s.ts)+']</span>'+(s.title?'<span class="sec-t">'+esc(s.title)+'</span>':'')+'</div>';
-        var ps=(s.paras&&s.paras.length?s.paras:[s.text]).map(function(p){return '<p class="sec-p">'+esc(p)+'</p>';}).join("");
+        var ps=(s.paras&&s.paras.length?s.paras:[s.text]).map(function(p){var e=esc(p).replace(/^(说话人\d+：)/,'<b class="spk">$1</b>');return '<p class="sec-p">'+e+'</p>';}).join("");
         return '<div class="sec" id="psec-'+i+'">'+h+ps+'</div>';}).join("");
     }else{
       scr.innerHTML=(j.lines||[]).map(function(l){
         return '<div class="line"><span class="ts">'+esc(l.ts)+'</span><span class="tx">'+esc(l.text)+'</span></div>';}).join("");
     }
     if(j.llm_error){scr.innerHTML='<div class="llm-err">⚠ 没接上大模型，已退回「原文 + 按时长分段」。原因：<br>'+esc(j.llm_error)+'</div>'+scr.innerHTML;}
+    if(j.diar_error){scr.innerHTML='<div class="llm-err">⚠ 说话人分离没成功，已按普通分段显示。原因：<br>'+esc(j.diar_error)+'</div>'+scr.innerHTML;}
     var sv=document.getElementById("saved");
     if(j.save_error){sv.innerHTML="⚠ 落点写入失败："+esc(j.save_error)+"（仍可用下方按钮导出）";}
     else if(j.saved_path){sv.innerHTML="已保存到 <b>"+esc(j.saved_path)+"</b>";}

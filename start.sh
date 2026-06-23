@@ -30,10 +30,17 @@ fi
 source .venv/bin/activate
 
 # 4) 依赖（用标记文件避免每次重装；requirements 变了会自动重装）
+#    兼容三种环境：标准 venv 自带 pip / uv 建的 venv（无 pip，用 uv）/ 无 pip 时 ensurepip 兜底
 if [ ! -f .venv/.deps_ok ] || [ requirements.txt -nt .venv/.deps_ok ]; then
   echo "→ 安装依赖（首次会下载 faster-whisper 等，稍久，请耐心）..."
-  python3 -m pip install -q --upgrade pip
-  python3 -m pip install -q -r requirements.txt
+  if python3 -m pip --version >/dev/null 2>&1; then
+    python3 -m pip install -q --upgrade pip
+    python3 -m pip install -q -r requirements.txt
+  elif command -v uv >/dev/null 2>&1; then
+    uv pip install -q -r requirements.txt
+  else
+    python3 -m ensurepip --upgrade && python3 -m pip install -q -r requirements.txt
+  fi
   touch .venv/.deps_ok
 fi
 
@@ -41,6 +48,7 @@ fi
 echo ""
 echo "→ 启动 PodScript：$URL"
 echo "  浏览器会自动打开；停止服务在本终端按 Ctrl+C。"
+echo "  （想区分访谈说话人？见 README「说话人分离」一节：装 requirements-diarize.txt + 配 HF_TOKEN）"
 (
   sleep 2
   if command -v open >/dev/null 2>&1; then open "$URL"

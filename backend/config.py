@@ -81,3 +81,10 @@ def llm_config(explicit_key: str | None = None,
             "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
         }
     return None
+
+
+def hf_token() -> str | None:
+    """HuggingFace token（说话人分离用）：按 HF_TOKEN / HUGGINGFACE_TOKEN / PYANNOTE_TOKEN 取。"""
+    import os
+    return (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+            or os.environ.get("PYANNOTE_TOKEN") or None)

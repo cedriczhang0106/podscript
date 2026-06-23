@@ -3,6 +3,8 @@
 把**小宇宙 / 苹果播客 / B 站**的一条链接，变成带时间戳的逐字稿 + AI 摘要 + 字幕，
 落成 [Obsidian](https://obsidian.md) 友好的 Markdown。**本地优先、离线免费、不上传**。
 
+![PodScript — Every podcast, transcribed](docs/screenshot.png)
+
 > **▶ 最简单的用法：网页版（推荐）**
 > 装好 ffmpeg 后，在项目目录里跑一条 **`bash start.sh`** —— 它会自动建环境、装依赖、起服务并打开浏览器（**http://127.0.0.1:8000**）。
 > 然后：粘链接 → 点「转写」→ 看摘要 / 大纲 / 逐字稿 → 一键导出。界面化操作，新手首选，比命令行直观得多。
@@ -19,6 +21,7 @@
 - **按话题分段 + 可点大纲**：接大模型时按话题把全文切成若干段、每段配小标题，并在段内自动分小段；网页左侧生成**可点击跳转、滚动悬浮**的大纲。纯本地则按每 10 分钟分段。
 - **同链接免重听写**：同一条链接再转会复用已缓存的逐字稿，跳过下载与转录，秒级重出清洗/分段（方便迭代）。
 - **来源透明**：结果区标明本次由「本地 Whisper」还是「AI · 模型名」产出；接不通模型时直接显示原因，不静默降级。
+- **区分说话人 · 访谈（可选）**：勾选后用 [pyannote](https://github.com/pyannote/pyannote-audio) 做声纹分离，访谈/多人播客按「说话人1 / 说话人2 …」分轮次显示。需额外装依赖 + 配 HF token，见下「说话人分离」。
 - 转录后**自动删音频**（文本优先）；原始带时间戳稿留档在 `_raw_podcast/`，重洗不用重下。
 
 ---
@@ -125,6 +128,32 @@ export DEEPSEEK_API_KEY=sk-...
 
 ---
 
+## 说话人分离（访谈类 · 可选）
+
+访谈、对谈类播客有多个说话人时，可让逐字稿按「说话人1 / 说话人2 …」分轮次显示。
+基础转写**用不到**这些，重依赖（torch / pyannote）都是**懒加载**——不开启就不引入。
+
+一次性配置：
+
+```bash
+# 1) 装可选依赖（含 torch，体积较大）
+pip install -r requirements-diarize.txt
+
+# 2) 到 https://hf.co/settings/tokens 建一个 token（read 权限即可）
+# 3) 在 https://huggingface.co/pyannote/speaker-diarization-3.1 页面点接受模型许可
+#    （会连带要求接受 pyannote/segmentation-3.0，一并接受）
+# 4) 设环境变量
+export HF_TOKEN=hf_xxxxxxxx
+```
+
+然后在网页转写时勾选 **「区分说话人 · 访谈」** 即可。首次会下载 pyannote 模型（约几十 MB）；
+分离计算在本地跑，有 GPU（CUDA / Apple MPS）会自动用，没有则用 CPU（稍慢）。
+分离没成功会**自动退回普通分段并显示原因**，不影响逐字稿产出。
+
+> 在 Clash 等 SOCKS 代理下下模型，`requirements-diarize.txt` 已带 `httpx[socks]`；不走代理可忽略。
+
+---
+
 ## 输出格式
 
 ```markdown
@@ -158,6 +187,7 @@ export DEEPSEEK_API_KEY=sk-...
 | `PODSCRIPT_CONFIG` | 落点配置文件路径（默认 `~/.podscript/config.json`） |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | 清洗/摘要 LLM（OpenAI 兼容端点） |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | 清洗/摘要 LLM（备选） |
+| `HF_TOKEN` / `HUGGINGFACE_TOKEN` | 说话人分离用的 HuggingFace token（见「说话人分离」） |
 
 ---
 
