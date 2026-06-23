@@ -20,6 +20,7 @@ def _safe(name: str, maxlen: int = 40) -> str:
 
 
 def run(url: str, *, engine: str = "auto", punctuate: bool = True, summary: bool = True,
+        allow_llm: bool = True,
         whisper_model: str = "small", llm_key: str | None = None,
         llm_base: str | None = None, llm_model: str | None = None,
         workdir: Path | None = None, keep_audio: bool = False,
@@ -33,6 +34,22 @@ def run(url: str, *, engine: str = "auto", punctuate: bool = True, summary: bool
     workdir.mkdir(parents=True, exist_ok=True)
     raw_dir = workdir / config.RAW_DIRNAME
     raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # 0. 复用缓存：同一链接之前转录过 → 跳过重下+重听写，直接拿原始稿重跑清洗/分段
+    #    （清洗/摘要/分段仍按本次设置与模型重算；想强制重听写就删 .work/_raw_podcast/ 对应文件）
+    for f in sorted(raw_dir.glob("*.raw.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if d.get("meta", {}).get("url") == url and d.get("segments"):
+                emit("复用已转录稿")
+                meta = d["meta"]
+                segments = [(s["start"], s["text"]) for s in d["segments"]]
+                emit("清洗与摘要")
+                result = pipeline.process(segments, punctuate=punctuate, summary=summary,
+                                          llm_key=llm_key, llm_base=llm_base, llm_model=llm_model, allow_llm=allow_llm)
+                return {"meta": meta, "result": result, "segments": segments, "raw_path": f}
+        except Exception:
+            continue
 
     # 1. 下载
     emit("下载音频")
@@ -57,7 +74,7 @@ def run(url: str, *, engine: str = "auto", punctuate: bool = True, summary: bool
         # 3. 清洗 + 提炼
         emit("清洗与摘要")
         result = pipeline.process(segments, punctuate=punctuate, summary=summary,
-                                  llm_key=llm_key, llm_base=llm_base, llm_model=llm_model)
+                                  llm_key=llm_key, llm_base=llm_base, llm_model=llm_model, allow_llm=allow_llm)
         return {"meta": meta, "result": result, "segments": segments, "raw_path": raw_path}
     finally:
         # 4. 文本优先：删音频（除非显式保留）

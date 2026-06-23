@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.request
+import urllib.error
 
 from . import config
 
@@ -22,20 +23,47 @@ def fmt_ts(seconds: float) -> str:
 
 
 # ── LLM 调用（OpenAI 兼容；deepseek 也兼容此端点）──
-def _llm_call(prompt: str, cfg: dict, max_tokens: int = 4096) -> str:
+def _llm_post(url: str, cfg: dict, prompt: str, max_tokens: int, temperature):
     body = json.dumps({
         "model": cfg["model"],
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": temperature,
     }).encode()
-    url = cfg["base_url"].rstrip("/") + "/chat/completions"
     req = urllib.request.Request(url, data=body, headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {cfg['key']}",
     })
     with urllib.request.urlopen(req, timeout=600) as r:
-        resp = json.load(r)
+        return json.load(r)
+
+
+def _llm_call(prompt: str, cfg: dict, max_tokens: int = 4096) -> str:
+    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    try:
+        resp = _llm_post(url, cfg, prompt, max_tokens, cfg.get("_temp", 0.3))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "ignore")[:400]
+        except Exception:
+            detail = ""
+        # 某些模型（如 Kimi k2.x 思考型）只允许 temperature=1，命中就用 1 重试一次
+        if e.code == 400 and "temperature" in detail.lower() and cfg.get("_temp", 0.3) != 1:
+            cfg["_temp"] = 1  # 记住该模型只接受 temperature=1，后续调用直接用、不再每次白撞一次 400
+            try:
+                resp = _llm_post(url, cfg, prompt, max_tokens, 1)
+            except urllib.error.HTTPError as e2:
+                try:
+                    d2 = e2.read().decode("utf-8", "ignore")[:400]
+                except Exception:
+                    d2 = ""
+                raise RuntimeError(f"HTTP {e2.code}（{url}）: {d2}") from None
+            except Exception as e2:
+                raise RuntimeError(f"连接失败（{url}）: {e2}") from None
+        else:
+            raise RuntimeError(f"HTTP {e.code}（{url}）: {detail}") from None
+    except Exception as e:
+        raise RuntimeError(f"连接失败（{url}）: {e}") from None
     # 只取最终 message.content；思考模型（GLM/DeepSeek）的推理在独立 reasoning_content 字段，
     # 不会进 content。个别模型会把思考包在 <think>…</think> 里混进 content，这里剥掉。
     content = resp["choices"][0]["message"].get("content") or ""
@@ -136,24 +164,142 @@ def _summarize(clean_text: str, cfg: dict | None) -> dict:
         return {"summary": "", "points": []}
 
 
+# ── 按要点/话题分段（让逐字稿不再一句一行）──
+def _ts_to_sec(ts: str) -> int:
+    m = re.search(r"(\d{1,2}):(\d{2})", ts or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else 0
+
+
+SEGMENT_PROMPT = """下面是一期播客带时间戳的逐字稿。请按话题把它切成 4-8 个连续段落（覆盖全程）。
+每段输出：一个简短小标题（≤20字，概括这段在讲什么）+ 该段开始的时间戳（必须是文中真实出现过的 [mm:ss]）。
+输出 JSON（不要 markdown 代码块）：{{"sections":[{{"title":"...","start":"mm:ss"}}, ...]}}
+要求：按时间先后排列；第一段 start 用最早的时间戳；标题用中文、像小标题不像整句。只输出 JSON。
+
+逐字稿：
+{text}"""
+
+
+def _segment_by_topic(clean_lines: list[str], cfg: dict) -> list[dict]:
+    """LLM 按话题切段，返回 [{'title':str,'start':秒}]；失败返回 []。"""
+    joined = "\n".join(clean_lines)
+    if len(joined) > 14000:
+        step = (len(joined) // 14000) + 1
+        joined = "\n".join(clean_lines[::step])
+    try:
+        resp = _llm_call(SEGMENT_PROMPT.format(text=joined), cfg, max_tokens=1024)
+        resp = re.sub(r"^```(?:json)?\s*|\s*```$", "", resp.strip(), flags=re.M)
+        m = re.search(r"\{.*\}", resp, re.S)
+        data = json.loads(m.group(0) if m else resp)
+        secs = []
+        for s in (data.get("sections") or []):
+            title = str(s.get("title", "")).strip()
+            if title:
+                secs.append({"title": title, "start": _ts_to_sec(str(s.get("start", "")))})
+        secs.sort(key=lambda x: x["start"])
+        return secs
+    except Exception:
+        return []
+
+
+def _time_block_sections(clean_lines: list[str], block_sec: int = 600) -> list[dict]:
+    """无 LLM 兜底：每 ~block_sec 秒（默认10分钟）一段。"""
+    secs, last = [], -1
+    for ln in clean_lines:
+        m = TS_LINE.match(ln)
+        if not m:
+            continue
+        blk = (_ts_to_sec(m.group(1)) // block_sec) * block_sec
+        if blk != last:
+            secs.append({"title": "", "start": blk})
+            last = blk
+    return secs
+
+
+def _split_paragraphs(text: str, target: int = 160) -> list[str]:
+    """把一段长文按句末标点切成 ~target 字的自然段落（清洗后才有标点，故有效）。"""
+    parts = re.split(r"(?<=[。！？!?…])", text)
+    paras, cur = [], ""
+    for p in parts:
+        if not p:
+            continue
+        cur += p
+        if len(cur) >= target:
+            paras.append(cur.strip())
+            cur = ""
+    if cur.strip():
+        paras.append(cur.strip())
+    return paras or ([text] if text else [])
+
+
+def _build_sections(clean_lines: list[str], boundaries: list[dict]) -> list[dict]:
+    """把每行归入最近一个起点<=该行时间的段；合并为段落文本。"""
+    rows = []
+    for ln in clean_lines:
+        m = TS_LINE.match(ln)
+        if m:
+            rows.append((_ts_to_sec(m.group(1)), m.group(1), m.group(2)))
+    if not boundaries:
+        boundaries = [{"title": "", "start": 0}]
+    boundaries = sorted(boundaries, key=lambda x: x["start"])
+    boundaries[0]["start"] = 0
+    out = []
+    for i, b in enumerate(boundaries):
+        start = b["start"]
+        end = boundaries[i + 1]["start"] if i + 1 < len(boundaries) else 10 ** 9
+        chunk = [r for r in rows if start <= r[0] < end]
+        if not chunk:
+            continue
+        text = "".join(r[2] for r in chunk).strip()
+        out.append({
+            "title": b.get("title", ""),
+            "ts": chunk[0][1].strip("[]"),
+            "text": text,
+            "paras": _split_paragraphs(text),
+            "lines": [{"ts": r[1].strip("[]"), "text": r[2]} for r in chunk],
+        })
+    return [s for s in out if s["text"]]
+
+
 # ── 主流程 ──
 def process(segments: list[tuple[float, str]], *, punctuate: bool = True,
             summary: bool = True, llm_key: str | None = None,
-            llm_base: str | None = None, llm_model: str | None = None) -> dict:
+            llm_base: str | None = None, llm_model: str | None = None,
+            allow_llm: bool = True) -> dict:
     """segments → {raw_lines, clean_lines, summary, points, cleaned}。"""
     raw_lines = [f"{fmt_ts(t)} {text}" for t, text in segments]
-    cfg = config.llm_config(llm_key, llm_base, llm_model) if (punctuate or summary) else None
+    cfg = config.llm_config(llm_key, llm_base, llm_model) if (allow_llm and (punctuate or summary)) else None
 
     clean_lines = _clean_chunked(raw_lines, cfg) if punctuate else raw_lines[:]
     cleaned_text = "\n".join(re.sub(r"^\[\d{1,2}:\d{2}\]\s*", "", l) for l in clean_lines)
 
+    llm_error = None
+    if cfg:
+        try:
+            _llm_call("回复两个字：ok", cfg, max_tokens=8)
+        except Exception as e:
+            llm_error = f"{type(e).__name__}: {str(e)[:300]}"
+            cfg = None
+    elif allow_llm and (punctuate or summary):
+        llm_error = "未接通在线模型：服务端没收到 API key（请在『接大模型』里粘贴 key 并点保存，再确认页面已刷新）"
+
     sm = _summarize(cleaned_text, cfg) if summary else {"summary": "", "points": []}
+
+    # 分段：有 LLM 按话题/要点切，否则按时长（10 分钟）合并
+    bounds = _segment_by_topic(clean_lines, cfg) if (cfg and summary) else []
+    if not bounds:
+        bounds = _time_block_sections(clean_lines, 600)
+    sections = _build_sections(clean_lines, bounds)
+    seg_points = [s["title"] for s in sections if s.get("title")]
+
     return {
         "raw_lines": raw_lines,
         "clean_lines": clean_lines,
         "summary": sm["summary"],
-        "points": sm["points"],
+        "points": seg_points or sm["points"],
+        "sections": sections,
         "llm_used": bool(cfg),
+        "llm_model": (cfg.get("model") if cfg else None),
+        "llm_error": llm_error,
     }
 
 
@@ -177,12 +323,17 @@ def to_markdown(meta: dict, result: dict, today: str) -> str:
     if result.get("points"):
         body += ["## 要点", ""] + [f"- {p}" for p in result["points"]] + [""]
     body += ["## 逐字稿", ""]
-    for ln in result["clean_lines"]:
-        m = TS_LINE.match(ln)
-        if m:
-            body.append(f"{m.group(1)} {m.group(2)}")
-        else:
-            body.append(ln)
+    secs = result.get("sections") or []
+    if secs:
+        for sct in secs:
+            head = f"### [{sct['ts']}]" + (f" {sct['title']}" if sct.get("title") else "")
+            body += [head, ""]
+            for para in (sct.get("paras") or [sct["text"]]):
+                body += [para, ""]
+    else:
+        for ln in result["clean_lines"]:
+            m = TS_LINE.match(ln)
+            body.append(f"{m.group(1)} {m.group(2)}" if m else ln)
     return "\n".join(fm + body) + "\n"
 
 
@@ -190,9 +341,18 @@ def to_txt(result: dict) -> str:
     lines = []
     if result.get("summary"):
         lines += [result["summary"], ""]
-    for ln in result["clean_lines"]:
-        m = TS_LINE.match(ln)
-        lines.append(m.group(2) if m else ln)
+    secs = result.get("sections") or []
+    if secs:
+        for sct in secs:
+            if sct.get("title"):
+                lines += [f"[{sct['ts']}] {sct['title']}"]
+            for para in (sct.get("paras") or [sct["text"]]):
+                lines += [para]
+            lines += [""]
+    else:
+        for ln in result["clean_lines"]:
+            m = TS_LINE.match(ln)
+            lines.append(m.group(2) if m else ln)
     return "\n".join(lines) + "\n"
 
 

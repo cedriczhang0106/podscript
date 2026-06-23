@@ -27,6 +27,7 @@ class TranscribeReq(BaseModel):
     engine: str = "auto"           # 转录恒本地（faster-whisper）；不再有云端 ASR
     punctuate: bool = True
     summary: bool = True
+    llm: bool = True               # 前端模式：接大模型=True，本地=False（False 时连环境变量里的 key 也不使用）
     api_key: str | None = None     # 「自带 KEY」：仅用于清洗+摘要 LLM（OpenAI 兼容），不碰转录
     api_base: str | None = None    # OpenAI 兼容 base_url（DeepSeek/Kimi/GLM）
     api_model: str | None = None   # 模型名
@@ -53,7 +54,7 @@ def transcribe(req: TranscribeReq):
         out = core.run(
             req.url,
             engine="local",                      # 转录恒本地 faster-whisper
-            punctuate=req.punctuate, summary=req.summary,
+            punctuate=req.punctuate, summary=req.summary, allow_llm=req.llm,
             whisper_model=req.whisper_model,
             llm_key=req.api_key, llm_base=req.api_base, llm_model=req.api_model,
         )
@@ -92,7 +93,10 @@ def transcribe(req: TranscribeReq):
         },
         "summary": result.get("summary", ""),
         "points": result.get("points", []),
+        "sections": result.get("sections", []),
         "llm_used": result.get("llm_used", False),
+        "llm_model": result.get("llm_model"),
+        "llm_error": result.get("llm_error"),
         "lines": lines,
         "saved_path": saved_path,
         "save_error": save_error,
